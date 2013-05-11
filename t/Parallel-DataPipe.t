@@ -1,7 +1,8 @@
 use strict;
 use warnings;
 
-use Test::More tests => 21;
+use Test::More tests => 25;
+#use Test::More tests => 4;
 use Time::HiRes qw(time);
 BEGIN { use_ok('Parallel::DataPipe') };
 
@@ -12,10 +13,12 @@ my $number_of_data_processors = 32;
 my $n_items = 4; # number of large item to process
 my $mb = 1024*1024;
 
+#test_forks();
 test_scalar_values();
 test_serialized_data();
 test_processor_number();
 test_other_children_survive();
+test_custom_serialize();
 
 # before testing big data let's top to see memory occupied
 #printf "Have a chance loot top -p%s ...\n",$$;<>;
@@ -33,16 +36,19 @@ exit 0;
 
 sub test_scalar_values {
     print "\n***Testing if conveyor works ok with simple scalar data...\n";
-    my @data = 1..1000; 
+    my @data = 1..2; 
     my @processed_data = ();
     Parallel::DataPipe::run {
         input_iterator => \@data,
         process_data => sub { $_*2 },
         merge_data => sub { push @processed_data, $_; },
+		number_of_data_processors => 2,
     };
     
     ok(@data==@processed_data,'length of processed scalar data');
-    ok(join(",",map $_*2, @data) eq join(",",sort {$a <=> $b} @processed_data),"processed scalar data values");
+    my $values_ok = join(",",map $_*2, @data) eq join(",",sort {$a <=> $b} @processed_data);
+    die "values not ok:".join(",",map $_*2, @data).".eq.". join(",",sort {$a <=> $b} @processed_data) unless $values_ok;
+    ok($values_ok,"processed scalar data values");
     #printf "processed data:%s\n",join ",",@processed_data;
     ok(zombies() == 0,'no zombies');
 }
@@ -183,6 +189,7 @@ sub test_other_children_survive {
     print "\n***Fork children, then run DataPipe conveyor and looks if our children survives after it...\n";
     
     # test other chlidren survive and not block
+    local $SIG{INT} = sub {exit;};
     my $child = fork();
     if ($child == 0) {
         # in normal situation it will be killed by parent
@@ -199,16 +206,36 @@ sub test_other_children_survive {
         number_of_data_processors => $number_of_data_processors,
         merge_data => sub {},
     };
-    ok(kill(1,$child)==1,'other child alive');
+    ok(kill('SIGINT',$child)==1,'other child alive');
     ok(wait == $child,'killed & ripped by parent');
     ok(zombies() == 0,'no zombies');
+}
+
+sub test_custom_serialize {
+    print "\n***Test custom serialization\n";
+    my @result;
+    Parallel::DataPipe::run {
+        input_iterator => [[1,2,3],[3,5,7]],
+        freeze => sub {pack "S*",@{$_[0]}},
+        thaw => sub {[unpack("S*",$_[0])]},
+        process_data => sub {$_},
+        merge_data => sub {push @result,$_},
+    };
+    ok(check_cs(@result) eq '1,2,3:3,5,7','custom serialization');
+    ok(zombies() == 0,'no zombies');
+}
+            
+sub check_cs {
+    return eval {
+        join ":", sort map join(",",@$_), @_;
+    } || '!';
 }
 
 use POSIX ":sys_wait_h";
 sub zombies {
     #printf "looking for sombies...\n";
     my $kid = waitpid(-1, WNOHANG);
-    return $kid > 0;
+    return $kid != -1;
 }
 
 
@@ -218,6 +245,36 @@ sub max_buf_size { my $d = shift;
     #print '$memtotal,$memused,$free:'."$memtotal,$memused,$free\n";
     my $r = $free / $d;
     # put reasonable limit for max buf size
-    $r = 256 * $mb if $r > 256 * $mb;
+    $r = 64 * $mb if $r > 64 * $mb;
     return $r;
+}
+
+sub test_forks {
+    my $child_killed = 0;
+    my %childs;
+    local $SIG{INT} = sub {exit};
+    print "***Testing fork capabilities...\n";
+    my $number_of_forks = Parallel::DataPipe::number_of_cpu_cores();
+    for my $i (1..$number_of_forks) {
+        my $pid = fork();
+        if ($pid == 0) {
+            sleep;
+            exit;
+        }
+        $childs{$pid} = undef;
+    }
+    printf "childs created:%s\n",join ",",keys %childs;
+    print "killing them\n";
+    kill('INT',keys %childs);
+    while (keys %childs) {
+        my $pid = waitpid(-1,WNOHANG);
+        last if $pid == -1;
+        if (exists $childs{$pid}) {
+            $child_killed++;
+            delete $childs{$pid};
+        }
+        #printf "waiting:%s\n", join ",",keys %childs;<>;
+    }
+    ok($child_killed==$number_of_forks,"fork test : forked $number_of_forks killed $child_killed, then successfully killed");
+    ok(zombies() == 0,'no zombies');
 }

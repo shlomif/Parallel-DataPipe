@@ -3,4 +3,8 @@ Revision history for Perl extension Parallel::DataPipe.
 0.01  Wed May  8 07:44:03 2013
 	- original version; created by h2xs 1.23 with options
 		-AX Parallel::DataPipe
+0.02  Added using of IO::Pipely if it can use this module.
+    This is required if you work with cygwin.
+    Still it does not work with Windows ActivePerl.
+    removed freeze & thaw parameters for custome serialization procedures
 
